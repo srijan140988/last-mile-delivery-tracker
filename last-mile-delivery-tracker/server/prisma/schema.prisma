@@ -1,0 +1,349 @@
+// Last-Mile Delivery Tracker — Prisma schema
+// Normalized relational schema modeling the actual business domain.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// ENUMS
+// ---------------------------------------------------------------------------
+
+enum Role {
+  CUSTOMER
+  AGENT
+  ADMIN
+}
+
+enum OrderType {
+  B2B
+  B2C
+}
+
+enum PaymentType {
+  PREPAID
+  COD
+}
+
+enum RateType {
+  INTRA_ZONE
+  INTER_ZONE
+}
+
+enum OrderStatus {
+  CREATED
+  ASSIGNED
+  PICKED_UP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+  RESCHEDULED
+  CANCELLED
+}
+
+enum AssignmentStatus {
+  ACTIVE
+  COMPLETED
+  REASSIGNED
+  CANCELLED
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+}
+
+enum NotificationStatus {
+  SENT
+  FAILED
+  SKIPPED
+}
+
+// ---------------------------------------------------------------------------
+// IDENTITY
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  role         Role
+  name         String
+  phone        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  customer Customer?
+  agent    DeliveryAgent?
+
+  @@index([role])
+}
+
+model Customer {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  companyName String? // used for B2B customers, optional
+  orders      Order[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model DeliveryAgent {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  isActive    Boolean @default(true)
+  isAvailable Boolean @default(true)
+
+  currentZoneId String?
+  currentZone   Zone?   @relation(fields: [currentZoneId], references: [id])
+
+  currentLat Float?
+  currentLng Float?
+
+  assignments AgentAssignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, isAvailable])
+  @@index([currentZoneId])
+}
+
+// ---------------------------------------------------------------------------
+// ZONES & AREAS  (Admin-managed Area/Postcode -> Zone mapping)
+// ---------------------------------------------------------------------------
+
+model Zone {
+  id          String  @id @default(uuid())
+  name        String  @unique
+  description String?
+
+  areas          Area[]
+  agents         DeliveryAgent[]
+  pickupOrders   Order[]           @relation("PickupZone")
+  dropOrders     Order[]           @relation("DropZone")
+
+  intraRateCards RateCard[] @relation("IntraZoneRates")
+  interFromRates RateCard[] @relation("InterZoneFromRates")
+  interToRates   RateCard[] @relation("InterZoneToRates")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Area {
+  id       String @id @default(uuid())
+  name     String
+  postcode String @unique
+  zoneId   String
+  zone     Zone   @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([zoneId])
+  @@index([postcode])
+}
+
+// ---------------------------------------------------------------------------
+// RATE CARDS  (fully admin-configurable, never hardcoded)
+// ---------------------------------------------------------------------------
+
+model RateCard {
+  id        String      @id @default(uuid())
+  orderType OrderType
+  rateType  RateType
+
+  // For INTRA_ZONE: zoneId is set, fromZoneId/toZoneId are null.
+  zoneId String?
+  zone   Zone?   @relation("IntraZoneRates", fields: [zoneId], references: [id])
+
+  // For INTER_ZONE: fromZoneId/toZoneId set, zoneId null.
+  fromZoneId String?
+  fromZone   Zone?   @relation("InterZoneFromRates", fields: [fromZoneId], references: [id])
+  toZoneId   String?
+  toZone     Zone?   @relation("InterZoneToRates", fields: [toZoneId], references: [id])
+
+  ratePerKg Float
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orderType, rateType])
+  @@index([zoneId])
+  @@index([fromZoneId, toZoneId])
+}
+
+model CodSurchargeConfig {
+  id         String      @id @default(uuid())
+  orderType  OrderType   @unique
+  flatFee    Float       @default(0)
+  percentage Float       @default(0) // percentage of base charge
+  isActive   Boolean     @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// ORDERS
+// ---------------------------------------------------------------------------
+
+model Order {
+  id            String @id @default(uuid())
+  orderNumber   String @unique
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  createdByUserId String // could be the customer themself, or an admin creating on their behalf
+  createdByRole   Role
+
+  pickupAddress String
+  pickupPincode String
+  pickupZoneId  String
+  pickupZone    Zone   @relation("PickupZone", fields: [pickupZoneId], references: [id])
+
+  dropAddress String
+  dropPincode String
+  dropZoneId  String
+  dropZone    Zone   @relation("DropZone", fields: [dropZoneId], references: [id])
+
+  lengthCm Float
+  breadthCm Float
+  heightCm Float
+  actualWeightKg Float
+  volumetricWeightKg Float
+  chargeableWeightKg Float
+
+  orderType   OrderType
+  paymentType PaymentType
+
+  rateType     RateType
+  ratePerKg    Float
+  baseCharge   Float
+  codSurcharge Float
+  totalCharge  Float
+
+  status OrderStatus @default(CREATED)
+
+  preferredDeliveryDate DateTime?
+
+  trackingEvents  TrackingEvent[]
+  assignments     AgentAssignment[]
+  reschedules     Reschedule[]
+  notifications   Notification[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([customerId])
+  @@index([pickupZoneId])
+  @@index([dropZoneId])
+}
+
+// ---------------------------------------------------------------------------
+// IMMUTABLE TRACKING HISTORY
+// ---------------------------------------------------------------------------
+
+model TrackingEvent {
+  id      String @id @default(uuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  previousStatus OrderStatus?
+  newStatus      OrderStatus
+
+  actorId   String // userId of whoever triggered this (agent/admin/customer/system)
+  actorRole Role
+
+  remarks String?
+
+  isAdminOverride Boolean @default(false)
+
+  createdAt DateTime @default(now()) // immutable — never updated
+
+  @@index([orderId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// AGENT ASSIGNMENT HISTORY (never overwritten — new rows on reassignment)
+// ---------------------------------------------------------------------------
+
+model AgentAssignment {
+  id      String @id @default(uuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  agentId String
+  agent   DeliveryAgent @relation(fields: [agentId], references: [id])
+
+  status AssignmentStatus @default(ACTIVE)
+
+  assignmentMethod String // "MANUAL" | "AUTO"
+  assignedByUserId String
+
+  distanceKm Float? // distance from agent to pickup at time of assignment, if known
+
+  reason String? // e.g. "Reassignment after failed delivery"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([agentId, status])
+}
+
+// ---------------------------------------------------------------------------
+// RESCHEDULE
+// ---------------------------------------------------------------------------
+
+model Reschedule {
+  id      String @id @default(uuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  failureReason   String
+  requestedDate   DateTime
+  requestedByUserId String
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICATIONS
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id      String @id @default(uuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  channel NotificationChannel
+  status  NotificationStatus
+
+  recipient String
+  subject   String?
+  body      String
+
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}
